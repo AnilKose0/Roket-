@@ -1,0 +1,39 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href=/style.css>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display&display=swap" rel="stylesheet">
+    <title>Erklik</title>
+</head>
+<body>
+    <header>
+        <div class="navbar">
+            <div class="logo">
+                <h2><a href="#">İSTİKBAL GÖKLERDEDİR! <br>Logo</a></h2>
+            </div>
+            <ul class="nav_links">
+                <li>
+                    <a href="#Anasayfa">Anasayfa</a>
+                    <a href="#Iletisim">Iletisim</a>
+                </li>
+            </ul>
+        </div>
+    </header>
+    <section id="inner_anasayfa">
+        <div class="child_anasayfa">
+            <h1>ROKET ILE ILGILI SEYLER <span class="span_child">IKINCI SEYLER</span></h1>
+            <p>Lorem10</p>
+        </div>
+        <div class="child_anasayfa">
+            <img src="roket.jpg" alt="">
+        </div>
+    </section>
+    <header class="bottom_header">
+        <div class="bottom_div">
+            <h1>Erklik Takımı</h1>
+        </div>
+    </header>
+    
+</body>
+</html>
