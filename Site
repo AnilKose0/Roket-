@@ -22,12 +22,25 @@
     </header>
     <section id="inner_anasayfa">
         <div class="child_anasayfa">
-            <h1>ROKET ILE ILGILI SEYLER <span class="span_child">IKINCI SEYLER</span></h1>
+            <h1>ROKET ILE ILGILI SEYLER <br> <span class="span_child">IKINCI SEYLER</span></h1>
             <p>Lorem10</p>
         </div>
-        <div class="child_anasayfa">
-            <img src="roket.jpg" alt="">
+        <div class="inner_achviement">
+            <div class="child_achviement">
+                <img src="roket.jpg" alt="">
+            </div>
+            <div class="child_achviement2">
+                <div class="single_detail1">
+                <h1>Misyon</h1>
+                    <p>Açıklama</p>
+                </div>
+                <div class="single_detail2">
+                <h1>Vizyon</h1>
+                    <p>Açıklama</p>
+                </div>
+            </div>
         </div>
+
     </section>
     <header class="bottom_header">
         <div class="bottom_div">
