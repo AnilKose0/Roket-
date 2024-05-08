@@ -1,0 +1,201 @@
+#include <Wire.h>
+#include "Kalman.h"
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+const int RX_PIN = 6, TX_PIN = 5;
+const uint32_t GPS_BAUD = 9600; //Default baud of NEO-6M is 9600
+TinyGPSPlus gps; // The TinyGPS++ object
+SoftwareSerial gpsSerial(RX_PIN, TX_PIN); // The serial interface to the GPS device
+
+Kalman kalmanX;
+Kalman kalmanY;
+Kalman kalmanZ;
+Adafruit_BME280 bme;
+
+#define SEALEVELPRESSURE_HPA (1013.25) // Deniz seviyesindeki basınç hPa cinsinden
+
+float initialAltitude = 0.0; // Başlangıç yüksekliği
+
+// Kalman filtresi parametreleri
+#define Q 0.01 // Süreç gürültüsü kovaryansı
+#define R 0.1  // Ölçüm gürültüsü kovaryansı
+
+float pressureEstimate = 0;       // Basınç tahmini
+float temperatureEstimate = 0;    // Sıcaklık tahmini
+float humidityEstimate = 0;       // Nem tahmini
+float altitudeEstimate = 0;       // Yükseklik tahmini
+
+float pressureErrorEstimate = 1;      // Basınç tahmini hata kovaryansı
+float temperatureErrorEstimate = 1;   // Sıcaklık tahmini hata kovaryansı
+float humidityErrorEstimate = 1;      // Nem tahmini hata kovaryansı
+float altitudeErrorEstimate = 1;      // Yükseklik tahmini hata kovaryansı
+
+void kalmanFilter(float measurement, float *estimate, float *errorEstimate) {
+  // Tahmin adımı
+  float predictedEstimate = *estimate;
+  float predictedErrorEstimate = *errorEstimate + Q;
+
+  // Güncelleme adımı
+  float kalmanGain = predictedErrorEstimate / (predictedErrorEstimate + R);
+  *estimate = predictedEstimate + kalmanGain * (measurement - predictedEstimate);
+  *errorEstimate = (1 - kalmanGain) * predictedErrorEstimate;
+}
+
+float AccX, AccY, AccZ;
+float GyroX, GyroY, GyroZ;
+float AngleRoll, AnglePitch, AngleYaw;
+
+unsigned long lastTime = 0;
+
+void gyro_signals(void) {
+  Wire.beginTransmission(0x68);
+  Wire.write(0x3B);
+  Wire.endTransmission();
+  Wire.requestFrom(0x68, 14);
+
+  while (Wire.available() < 14);
+
+  AccX = Wire.read() << 8 | Wire.read();
+  AccY = Wire.read() << 8 | Wire.read();
+  AccZ = Wire.read() << 8 | Wire.read();
+  Wire.read();
+  Wire.read();
+  Wire.read();
+  GyroX = Wire.read() << 8 | Wire.read();
+  GyroY = Wire.read() << 8 | Wire.read();
+  GyroZ = Wire.read() << 8 | Wire.read();
+}
+
+void setup() {
+  Serial.begin(19200);
+  gpsSerial.begin(GPS_BAUD);
+
+  Serial.println(F("Arduino - GPS module"));
+  Wire.begin();
+  kalmanX.setAngle(0);
+  kalmanY.setAngle(0);
+  kalmanZ.setAngle(0);
+  while (!Serial);
+
+  if (!bme.begin(0x76)) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+
+  initialAltitude = bme.readAltitude(SEALEVELPRESSURE_HPA); // Başlangıç yüksekliğini al
+}
+
+void loop() {
+  gyro_signals();
+
+  float roll = atan2(AccY, AccZ) * 180 / PI;
+  float pitch = atan(-AccX / sqrt(AccY * AccY + AccZ * AccZ)) * 180 / PI;
+  float yaw = atan2(AccZ, sqrt(AccX * AccX + AccY * AccY)) * 180 / PI;
+
+  float gyroXrate = GyroX / 131.0;
+  float gyroYrate = GyroY / 131.0;
+  float gyroZrate = GyroZ / 131.0;
+
+  unsigned long currentTime = millis();
+  float dt = (float)(currentTime - lastTime) / 1000;
+  lastTime = currentTime;
+
+  AngleRoll = kalmanX.getAngle(roll, gyroXrate, dt);
+  AnglePitch = kalmanY.getAngle(pitch, gyroYrate, dt);
+  AngleYaw = kalmanZ.getAngle(yaw, gyroZrate, dt);
+  float temperature = bme.readTemperature(); // Sıcaklık okuması
+  float pressure_hPa = bme.readPressure() / 100.0F; // Basınç okuması
+  float humidity = bme.readHumidity(); // Nem okuması
+  float altitude_m = bme.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude; // Yükseklik okuması
+
+  // Kalman filtresi için ölçümler
+  kalmanFilter(pressure_hPa, &pressureEstimate, &pressureErrorEstimate);
+  kalmanFilter(temperature, &temperatureEstimate, &temperatureErrorEstimate);
+  kalmanFilter(humidity, &humidityEstimate, &humidityErrorEstimate);
+  kalmanFilter(altitude_m, &altitudeEstimate, &altitudeErrorEstimate);
+  if (gpsSerial.available() > 0) {
+    if (gps.encode(gpsSerial.read())) {
+      if (gps.location.isValid()) {
+        Serial.print(F("- latitude: "));
+        Serial.println(gps.location.lat());
+
+        Serial.print(F("- longitude: "));
+        Serial.println(gps.location.lng());
+
+        Serial.print(F("- altitude: "));
+        if (gps.altitude.isValid())
+          Serial.println(gps.altitude.meters());
+        else
+          Serial.println(F("INVALID"));
+      } else {
+        Serial.println(F("- location: INVALID"));
+      }
+
+      Serial.print(F("- speed: "));
+      if (gps.speed.isValid()) {
+        Serial.print(gps.speed.kmph());
+        Serial.println(F(" km/h"));
+      } else {
+        Serial.println(F("INVALID"));
+      }
+
+      Serial.print(F("- GPS date&time: "));
+      if (gps.date.isValid() && gps.time.isValid()) {
+        Serial.print(gps.date.year());
+        Serial.print(F("-"));
+        Serial.print(gps.date.month());
+        Serial.print(F("-"));
+        Serial.print(gps.date.day());
+        Serial.print(F(" "));
+        Serial.print(gps.time.hour()+3);
+        Serial.print(F(":"));
+        Serial.print(gps.time.minute());
+        Serial.print(F(":"));
+        Serial.println(gps.time.second());
+      } else {        Serial.println(F("INVALID"));
+      }
+
+   
+}
+
+  // Sonuçları seri monitöre yazdırma
+  Serial.print("Pressure = ");
+  Serial.print(bme.readPressure());
+  Serial.print(" Filtered Pressure = ");
+  Serial.print(pressureEstimate);
+  Serial.println(" hPa");
+  Serial.print("Filtered Temperature = ");
+  Serial.print(temperatureEstimate);
+  Serial.println(" C");
+  Serial.print("Temperature = ");
+  Serial.print(bme.readTemperature());
+  Serial.print(" Filtered Humidity = ");
+  Serial.print(humidityEstimate);
+  Serial.println(" %");
+  Serial.print("Filtered Altitude = ");
+  Serial.print(altitudeEstimate);
+  Serial.println(" meters");
+  Serial.print("\nRoll: ");
+  Serial.print(roll);
+  Serial.print("\tPitch: ");
+  Serial.print(pitch);
+  Serial.print("\tYaw: ");
+  Serial.println(yaw);
+  Serial.print("\nFiltered Roll: ");
+  Serial.print(AngleRoll);
+  Serial.print("\tFiltered Pitch: ");
+  Serial.print(AnglePitch);
+  Serial.print("\tFiltered Yaw: ");
+  Serial.println(AngleYaw);
+  Serial.println();
+     
+    }
+  
+
+  if (millis() > 5000 && gps.charsProcessed() < 10)
+    Serial.println(F("No GPS data received: check wiring"));
+
+  delay(2000);
+}
