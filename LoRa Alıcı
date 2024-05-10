@@ -1,0 +1,37 @@
+//ALICI
+#include "LoRa_E32.h"
+#include <SoftwareSerial.h>
+SoftwareSerial mySerial(10, 11); // Arduino RX <-- e22 TX, Arduino TX --> e22 RX
+LoRa_E32 E32(&mySerial);
+#define M0 7
+#define M1 6
+struct veriler {
+  float    deger1;
+  float    deger2;
+  float    deger3;
+} data;
+ 
+void setup() {
+  pinMode(M0, OUTPUT);
+  pinMode(M1, OUTPUT);
+  digitalWrite(M0, LOW);
+  digitalWrite(M1, LOW);
+  Serial.begin(9600);
+  E32.begin();
+  delay(500);
+}
+void loop() {
+  while (E32.available()  > 1) {
+ 
+    // Gelen mesaj okunuyor
+    ResponseStructContainer rsc = E32.receiveMessage(sizeof(veriler));
+    struct veriler data = *(veriler*) rsc.data;
+    Serial.println("Gelen Messaj: ");
+    Serial.println(data.deger1);
+    Serial.println(data.deger2);
+    Serial.println(data.deger3);
+
+ 
+    rsc.close();
+  }
+}
