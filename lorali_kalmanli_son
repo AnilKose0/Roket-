@@ -1,0 +1,325 @@
+#include <Wire.h>
+#include <Adafruit_BME280.h>
+#include "Kalman.h"
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include "LoRa_E32.h"
+
+
+SoftwareSerial mySerial(10, 11); // Arduino RX <-- e32 TX, Arduino TX --> e32 RX
+LoRa_E32 E32(&mySerial);
+
+#define M0 7
+#define M1 6
+
+Adafruit_BME280 bme;
+TinyGPSPlus gps; // The TinyGPS++ object
+SoftwareSerial gpsSerial(6, 5); // RX_PIN = 6, TX_PIN = 5
+const uint32_t GPS_BAUD = 9600; // GPS modülünün baud hızı
+const uint32_t SERIAL_BAUD = 9600; // Diğer seri haberleşme hızı
+const unsigned long SENSOR_DELAY = 100; // Sensör verilerini güncelleme aralığı (ms)
+
+#define SEALEVELPRESSURE_HPA (1013.25) // Deniz seviyesindeki basınç hPa cinsinden
+
+float initialAltitude = 0.0; // Başlangıç yüksekliği
+
+float RateRoll, RatePitch, RateYaw;
+float AccX, AccY, AccZ;
+float AngleRoll, AnglePitch, AngleYaw, AngleRollF, AnglePitchF, AngleYawF;
+float LoopTimer;
+
+Kalman kalmanX;
+Kalman kalmanY;
+Kalman kalmanZ;
+
+// Kalman filtresi parametreleri
+#define Q 0.01 // Süreç gürültüsü kovaryansı
+#define R 0.1  // Ölçüm gürültüsü kovaryansı
+
+float pressureEstimate = 0;       // Basınç tahmini
+float temperatureEstimate = 0;    // Sıcaklık tahmini
+float humidityEstimate = 0;       // Nem tahmini
+float altitudeEstimate = 0;       // Yükseklik tahmini
+
+float AccXEstimate = 0;
+float AccYEstimate = 0;
+float AccZEstimate = 0;
+
+float pressureErrorEstimate = 1;      // Basınç tahmini hata kovaryansı
+float temperatureErrorEstimate = 1;   // Sıcaklık tahmini hata kovaryansı
+float humidityErrorEstimate = 1;      // Nem tahmini hata kovaryansı
+float altitudeErrorEstimate = 1;      // Yükseklik tahmini hata kovaryansı
+
+float AccXError = 1;
+float AccYError = 1;
+float AccZError = 1;
+
+void kalmanFilter(float measurement, float *estimate, float *errorEstimate) {
+  // Tahmin adımı
+  float predictedEstimate = *estimate;
+  float predictedErrorEstimate = *errorEstimate + Q;
+
+  // Güncelleme adımı
+  float kalmanGain = predictedErrorEstimate / (predictedErrorEstimate + R);
+  *estimate = predictedEstimate + kalmanGain * (measurement - predictedEstimate);
+  *errorEstimate = (1 - kalmanGain) * predictedErrorEstimate;
+}
+
+unsigned long lastTime = 0;
+
+void gyro_signals() {
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1A);
+    Wire.write(0x05);
+    Wire.endTransmission();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1C);
+    Wire.write(0x10);
+    Wire.endTransmission();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x3B);
+    Wire.endTransmission();
+    Wire.requestFrom(0x68, 6);
+    int16_t AccXLSB = Wire.read() << 8 | Wire.read();
+    int16_t AccYLSB = Wire.read() << 8 | Wire.read();
+    int16_t AccZLSB = Wire.read() << 8 | Wire.read();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1B);
+    Wire.write(0x8);
+    Wire.endTransmission();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x43);
+    Wire.endTransmission();
+    Wire.requestFrom(0x68, 6);
+    int16_t GyroX = Wire.read() << 8 | Wire.read();
+    int16_t GyroY = Wire.read() << 8 | Wire.read();
+    int16_t GyroZ = Wire.read() << 8 | Wire.read();
+    RateRoll = (float)GyroX / 65.5;
+    RatePitch = (float)GyroY / 65.5;
+    RateYaw = (float)GyroZ / 65.5;
+    AccX = (float)AccXLSB / 4096;
+    AccY = (float)AccYLSB / 4096;
+    AccZ = (float)AccZLSB / 4096;
+    AngleRoll = atan(AccY / sqrt(AccX * AccX + AccZ * AccZ)) * 1 / (3.142 / 180);
+    AnglePitch = -atan(AccX / sqrt(AccY * AccY + AccZ * AccZ)) * 1 / (3.142 / 180);
+    AngleYaw = atan2(AccZ, sqrt(pow(AccX, 2) + pow(AccY, 2))) * 1 / (3.142 / 180);
+}
+//Lora Data List
+struct veriler {
+  float    deger1;
+  float    deger2;
+  float    deger3;
+  float    deger4;
+  float    deger5;
+  float    deger6;
+  float    deger7;
+  float    deger8;
+  float    deger9;
+  float    deger10;
+  float    deger11;
+  float    deger12;
+  float    deger13;
+  float    deger14;
+  float    deger15;
+  float    deger16;
+  float    deger17;
+  float    deger18;
+  float    deger19;
+  float    deger20;
+} data;
+
+void setup() {
+    Serial.begin(SERIAL_BAUD);
+    if (!bme.begin(0x76)) {
+        Serial.println("Could not find a valid BME280 sensor, check wiring!");
+        while (1);
+    }
+    
+    //LORA SETUP
+    pinMode(M0, OUTPUT);
+    pinMode(M1, OUTPUT);
+    digitalWrite(M0, LOW);
+    digitalWrite(M1, LOW);
+    E32.begin();
+    delay(500);
+    //
+    
+    
+    initialAltitude = bme.readAltitude(SEALEVELPRESSURE_HPA); // Başlangıç yüksekliğini al
+    pinMode(13, OUTPUT);
+    digitalWrite(13, HIGH);
+    Wire.setClock(400000);
+    Wire.begin();
+    delay(250);
+    Wire.beginTransmission(0x68);
+    Wire.write(0x6B);
+    Wire.write(0x00);
+    Wire.endTransmission();
+    gpsSerial.begin(GPS_BAUD);
+    Serial.println(F("Arduino - GPS module"));
+}
+
+void loop() {
+    unsigned long currentTime = millis();
+    
+        gyro_signals();
+    
+        float dt = (float)(currentTime - lastTime) / 1000;
+
+        AngleRoll = kalmanX.getAngle(AngleRoll, RateRoll, dt);
+        AnglePitch = kalmanY.getAngle(AnglePitch, RatePitch, dt);
+        AngleYaw = kalmanZ.getAngle(AngleYaw, RateYaw, dt);
+        float temperature = bme.readTemperature(); // Sıcaklık okuması
+        float pressure_hPa = bme.readPressure() / 100.0F; // Basınç okuması
+        float humidity = bme.readHumidity(); // Nem okuması
+        float altitude_m = bme.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude; // Yükseklik okuması
+
+        // Kalman filtresi BME için ölçümler
+        kalmanFilter(pressure_hPa, &pressureEstimate, &pressureErrorEstimate);
+        kalmanFilter(temperature, &temperatureEstimate, &temperatureErrorEstimate);
+        kalmanFilter(humidity, &humidityEstimate, &humidityErrorEstimate);
+        kalmanFilter(altitude_m, &altitudeEstimate, &altitudeErrorEstimate);
+      
+        // MPU İvme Kalman
+        kalmanFilter(AccX, &AccXEstimate, &AccXError);
+        kalmanFilter(AccY, &AccYEstimate, &AccYError);
+        kalmanFilter(AccZ, &AccZEstimate, &AccZError);
+      
+        AngleRollF = kalmanX.getAngle(AngleRoll, RateRoll, dt);
+        AnglePitchF = kalmanY.getAngle(AnglePitch, RatePitch, dt);
+        AngleYawF = kalmanZ.getAngle(AngleYaw, RateYaw, dt);
+
+        data.deger1 = AccXEstimate;
+        Serial.print("Filtered ACC X= ");
+        Serial.println(AccXEstimate);
+
+        data.deger2 = AccYEstimate;
+        Serial.print("Filtered ACC Y= ");
+        Serial.println(AccYEstimate);
+
+        data.deger3 = AccZEstimate;
+        Serial.print("Filtered ACC Z= ");
+        Serial.println(AccZEstimate);
+
+
+        data.deger4 = pressureEstimate;
+        Serial.print(" Filtered Pressure = ");
+        Serial.print(pressureEstimate);
+        Serial.println(" hPa");
+
+        data.deger5 = temperatureEstimate;
+        Serial.print("Filtered Temperature = ");
+        Serial.print(temperatureEstimate);
+        Serial.println(" C");
+
+        data.deger6 = humidityEstimate;
+        Serial.print(" Filtered Humidity = ");
+        Serial.print(humidityEstimate);
+        Serial.println(" %");
+
+        data.deger7 = altitudeEstimate;
+        Serial.print("Filtered Altitude = ");
+        Serial.print(altitudeEstimate);
+        Serial.println(" meters");
+
+        data.deger8 = AngleRollF;
+        Serial.print("Filtered Roll angle ");
+        Serial.println(AngleRollF);
+
+        data.deger9 = AnglePitchF;
+        Serial.print(" Filtered Pitch angle ");
+        Serial.println(AnglePitchF);
+
+        data.deger10 = AngleYawF;
+        Serial.print("Filtered Yaw angle ");
+        Serial.println(AngleYawF);
+      
+        // GPS loop
+        while (gpsSerial.available() > 0) {
+            if (gps.encode(gpsSerial.read())) {
+                if (gps.location.isValid()) {
+                    
+                    data.deger11 = gps.location.lat();
+                    Serial.print(F("GPS latitude: "));
+                    Serial.println(gps.location.lat(), 6);
+
+                    data.deger12 = gps.location.lng();
+                    Serial.print(F("GPS longitude: "));
+                    Serial.println(gps.location.lng(), 6);
+
+                    data.deger13 = gps.altitude.meters();
+                    Serial.print(F("GPS altitude: "));
+                    if (gps.altitude.isValid())
+                        Serial.println(gps.altitude.meters());
+                    else
+                        Serial.println(F("INVALID"));
+                } else {
+                    Serial.println(F("GPS location: INVALID"));
+                }
+
+                data.deger14 = gps.speed.kmph();
+                Serial.print(F("GPS speed: "));
+                if (gps.speed.isValid()) {
+                    Serial.print(gps.speed.kmph());
+                    Serial.println(F(" km/h"));
+                } else {
+                    Serial.println(F("INVALID"));
+                }
+
+                data.deger15 = gps.date.year();
+                data.deger16 = gps.date.month();
+                data.deger17 = gps.date.day();
+                data.deger18 = gps.time.hour();
+                data.deger19 = gps.time.minute();
+                data.deger20 = gps.time.second();
+                
+                Serial.print(F("GPS date&time: "));
+                if (gps.date.isValid() && gps.time.isValid()) {
+                    Serial.print(gps.date.year());
+                    Serial.print(F("-"));
+                    Serial.print(gps.date.month());
+                    Serial.print(F("-"));
+                    Serial.print(gps.date.day());
+                    Serial.print(F(" "));
+                    Serial.print(gps.time.hour()+3);
+                    Serial.print(F(":"));
+                    Serial.print(gps.time.minute());
+                    Serial.print(F(":"));
+                    Serial.println(gps.time.second());
+                } else {
+                    Serial.println(F("GPS date&time: INVALID"));
+                }
+
+                Serial.println();
+            }
+        }
+
+  /*data.deger1 = data1; 
+  data.deger2 = data2;
+  data.deger3 = data3;
+  data.deger4 = data4; 
+  data.deger5 = data5;
+  data.deger6 = data6;
+  data.deger7 = data7;
+  data.deger8 = data8;
+  data.deger9 = data9;
+  data.deger10 = data10; 
+  data.deger11= data11;
+  data.deger12= data12;
+  data.deger13= data13; 
+  data.deger14= data14;
+  data.deger15= data15;
+  data.deger16= data16;
+  data.deger17= data17;
+  data.deger18= data18;
+  data.deger19= data19;
+  data.deger20 = data20;
+*/  
+
+  E32.sendMessage((float *)&data, sizeof(veriler));
+
+  delay(1000);
+
+        
+    
+}
