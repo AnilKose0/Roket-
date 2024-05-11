@@ -1,0 +1,197 @@
+//ÇALIŞMAZSA KALMAN.H YÜKLE
+
+#include <Wire.h>
+#include <Adafruit_BME280.h>
+#include "Kalman.h"
+
+Adafruit_BME280 bme;
+
+#define SEALEVELPRESSURE_HPA (1013.25) // Deniz seviyesindeki basınç hPa cinsinden
+
+float initialAltitude = 0.0; // Başlangıç yüksekliği
+
+float RateRoll, RatePitch, RateYaw;
+float AccX, AccY, AccZ;
+float AngleRoll, AnglePitch, AngleYaw, AngleRollF, AnglePitchF, AngleYawF;
+float LoopTimer;
+
+Kalman kalmanX;
+Kalman kalmanY;
+Kalman kalmanZ;
+
+// Kalman filtresi parametreleri
+#define Q 0.01 // Süreç gürültüsü kovaryansı
+#define R 0.1  // Ölçüm gürültüsü kovaryansı
+
+float pressureEstimate = 0;       // Basınç tahmini
+float temperatureEstimate = 0;    // Sıcaklık tahmini
+float humidityEstimate = 0;       // Nem tahmini
+float altitudeEstimate = 0;       // Yükseklik tahmini
+
+float AccXEstimate = 0;
+float AccYEstimate = 0;
+float AccZEstimate = 0;
+
+float pressureErrorEstimate = 1;      // Basınç tahmini hata kovaryansı
+float temperatureErrorEstimate = 1;   // Sıcaklık tahmini hata kovaryansı
+float humidityErrorEstimate = 1;      // Nem tahmini hata kovaryansı
+float altitudeErrorEstimate = 1;      // Yükseklik tahmini hata kovaryansı
+
+float AccXError = 1;
+float AccYError = 1;
+float AccZError = 1;
+
+void kalmanFilter(float measurement, float *estimate, float *errorEstimate) {
+  // Tahmin adımı
+  float predictedEstimate = *estimate;
+  float predictedErrorEstimate = *errorEstimate + Q;
+
+  // Güncelleme adımı
+  float kalmanGain = predictedErrorEstimate / (predictedErrorEstimate + R);
+  *estimate = predictedEstimate + kalmanGain * (measurement - predictedEstimate);
+  *errorEstimate = (1 - kalmanGain) * predictedErrorEstimate;
+}
+
+unsigned long lastTime = 0;
+
+void gyro_signals() {
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1A);
+    Wire.write(0x05);
+    Wire.endTransmission();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1C);
+    Wire.write(0x10);
+    Wire.endTransmission();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x3B);
+    Wire.endTransmission();
+    Wire.requestFrom(0x68, 6);
+    int16_t AccXLSB = Wire.read() << 8 | Wire.read();
+    int16_t AccYLSB = Wire.read() << 8 | Wire.read();
+    int16_t AccZLSB = Wire.read() << 8 | Wire.read();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1B);
+    Wire.write(0x8);
+    Wire.endTransmission();
+    Wire.beginTransmission(0x68);
+    Wire.write(0x43);
+    Wire.endTransmission();
+    Wire.requestFrom(0x68, 6);
+    int16_t GyroX = Wire.read() << 8 | Wire.read();
+    int16_t GyroY = Wire.read() << 8 | Wire.read();
+    int16_t GyroZ = Wire.read() << 8 | Wire.read();
+    RateRoll = (float)GyroX / 65.5;
+    RatePitch = (float)GyroY / 65.5;
+    RateYaw = (float)GyroZ / 65.5;
+    AccX = (float)AccXLSB / 4096;
+    AccY = (float)AccYLSB / 4096;
+    AccZ = (float)AccZLSB / 4096;
+    AngleRoll = atan(AccY / sqrt(AccX * AccX + AccZ * AccZ)) * 1 / (3.142 / 180);
+    AnglePitch = -atan(AccX / sqrt(AccY * AccY + AccZ * AccZ)) * 1 / (3.142 / 180);
+    AngleYaw = atan2(AccZ, sqrt(pow(AccX, 2) + pow(AccY, 2))) * 1 / (3.142 / 180);
+}
+
+void setup() {
+    Serial.begin(57600);
+    if (!bme.begin(0x76)) {
+        Serial.println("Could not find a valid BME280 sensor, check wiring!");
+        while (1);
+    }
+    initialAltitude = bme.readAltitude(SEALEVELPRESSURE_HPA); // Başlangıç yüksekliğini al
+    pinMode(13, OUTPUT);
+    digitalWrite(13, HIGH);
+    Wire.setClock(400000);
+    Wire.begin();
+    delay(250);
+    Wire.beginTransmission(0x68);
+    Wire.write(0x6B);
+    Wire.write(0x00);
+    Wire.endTransmission();
+}
+
+void loop() {
+    gyro_signals();
+    
+  unsigned long currentTime = millis();
+  float dt = (float)(currentTime - lastTime) / 1000;
+  lastTime = currentTime;
+
+  AngleRoll = kalmanX.getAngle(AngleRoll, RateRoll, dt);
+  AnglePitch = kalmanY.getAngle(AnglePitch, RatePitch, dt);
+  AngleYaw = kalmanZ.getAngle(AngleYaw, RateYaw, dt);
+  float temperature = bme.readTemperature(); // Sıcaklık okuması
+  float pressure_hPa = bme.readPressure() / 100.0F; // Basınç okuması
+  float humidity = bme.readHumidity(); // Nem okuması
+  float altitude_m = bme.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude; // Yükseklik okuması
+
+  // Kalman filtresi BME için ölçümler
+  kalmanFilter(pressure_hPa, &pressureEstimate, &pressureErrorEstimate);
+  kalmanFilter(temperature, &temperatureEstimate, &temperatureErrorEstimate);
+  kalmanFilter(humidity, &humidityEstimate, &humidityErrorEstimate);
+  kalmanFilter(altitude_m, &altitudeEstimate, &altitudeErrorEstimate);
+  
+  
+  // MPU İvme Kalman
+  kalmanFilter(AccX, &AccXEstimate, &AccXError);
+  kalmanFilter(AccY, &AccYEstimate, &AccYError);
+  kalmanFilter(AccZ, &AccZEstimate, &AccZError);
+  
+
+  
+  AngleRollF = kalmanX.getAngle(AngleRoll, RateRoll, dt);
+  AnglePitchF = kalmanY.getAngle(AnglePitch, RatePitch, dt);
+  AngleYawF = kalmanZ.getAngle(AngleYaw, RateYaw, dt);
+
+    
+    
+  Serial.print("ACC X= ");
+    Serial.println(AccX);
+    Serial.print("Filtered ACC X= ");
+    Serial.println(AccXEstimate);
+    Serial.print("ACC y= ");
+    Serial.println(AccY);
+    Serial.print("Filtered ACC Y= ");
+    Serial.println(AccYEstimate);
+    Serial.print("ACC Z=  ");
+    Serial.println(AccZ);
+    Serial.print("Filtered ACC Z= ");
+    Serial.println(AccZEstimate);
+  
+  
+  Serial.print("Pressure = ");
+  Serial.print(bme.readPressure());
+  Serial.print(" Filtered Pressure = ");
+  Serial.print(pressureEstimate);
+  Serial.println(" hPa");
+  Serial.print("Filtered Temperature = ");
+  Serial.print(temperatureEstimate);
+  Serial.println(" C");
+  Serial.print("Temperature = ");
+  Serial.print(bme.readTemperature());
+  Serial.print(" Filtered Humidity = ");
+  Serial.print(humidityEstimate);
+  Serial.println(" %");
+  Serial.print("Filtered Altitude = ");
+  Serial.print(altitudeEstimate);
+  Serial.println(" meters");
+
+
+  Serial.print("Roll angle ");
+    Serial.println(AngleRoll);
+    Serial.print("Filtered Roll angle ");
+    Serial.println(AngleRollF);
+    Serial.print(" Pitch angle ");
+    Serial.println(AnglePitch);
+    Serial.print(" Filtered Pitch angle ");
+    Serial.println(AnglePitchF);
+    Serial.print("  Yaw angle ");
+    Serial.println(AngleYaw);
+    Serial.print("Filtered Yaw angle ");
+    Serial.println(AngleYawF);
+
+  Serial.println();
+  delay(50);
+    delay(500);
+    
+}
